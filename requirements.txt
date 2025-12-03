@@ -1,7 +1,6 @@
-flask
-flask-cors
-flask-socketio
+Flask
+Flask-SocketIO
 eventlet
-python-socketio
-requests
-
+PyQt6
+python-socketio[client]
+gunicorn

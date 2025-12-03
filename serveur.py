@@ -1,240 +1,155 @@
-# serveur.py
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from flask_socketio import SocketIO, disconnect
-import json
-import os
+# main.py - Serveur Flask-SocketIO pour bapteme.orender.com
+from flask import Flask, request
+from flask_socketio import SocketIO, emit
+import sqlite3
 import datetime
-import threading
+import re
+from threading import Lock
 
 app = Flask(__name__)
-CORS(app)
-# utiliser eventlet pour la production (Render supporte eventlet)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+app.config['SECRET_KEY'] = 'ton-secret-ultra-fort-ici-123456789'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-DATA_FILE = 'central_data.json'
-PARISH_CERTS_FILE = 'parish_certs.json'  # certificats (simples tokens) par code paroisse
-lock = threading.Lock()
+# Verrou pour la base de données
+db_lock = Lock()
 
-# --- Utils ---
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {'marriages': []}
+# Initialisation DB
+def init_db():
+    with sqlite3.connect('mariages.db') as conn:
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS mariages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nom_epoux TEXT NOT NULL,
+                nom_epouse TEXT NOT NULL,
+                date_mariage TEXT NOT NULL,
+                lieu_mariage TEXT NOT NULL,
+                nom_paroisse TEXT NOT NULL,
+                officiant TEXT NOT NULL,
+                temoin1 TEXT NOT NULL,
+                temoin2 TEXT NOT NULL,
+                num_acte_local INTEGER NOT NULL,
+                num_acte_central TEXT UNIQUE NOT NULL,
+                statut_transmission BOOLEAN DEFAULT 0,
+                date_transmission TEXT
+            )
+        ''')
+        conn.commit()
 
-def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# Générer Num_acte_central : AAAA/PP/XXXX
+def generer_num_central(paroisse_code, annee):
+    with db_lock:
+        with sqlite3.connect('mariages.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM mariages WHERE num_acte_central LIKE ?", (f"{annee}/{paroisse_code}/%",))
+            count = c.fetchone()[0] + 1
+            return f"{annee}/{paroisse_code}/{count:04d}"
 
-def load_parish_certs():
-    if os.path.exists(PARISH_CERTS_FILE):
-        with open(PARISH_CERTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    # exemple de token pour paroisse "ST" (à remplacer / ajouter)
-    sample = {"ST": "secret-token-st"}
-    with open(PARISH_CERTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(sample, f, ensure_ascii=False, indent=2)
-    return sample
+init_db()
 
-def parish_code_from_name(name):
-    letters = ''.join(c for c in name.upper() if c.isalpha())
-    if len(letters) >= 2:
-        return letters[:2]
-    return (letters + "X")[:2]
+# Route de test
+@app.route('/')
+def index():
+    return "Serveur Mariages Catholiques ON - bapteme.orender.com"
 
-def next_sequence_for_parish(data, year, parish_code):
-    count = 0
-    prefix = f"{year}/{parish_code}/"
-    for m in data['marriages']:
-        if m.get('num_acte_central','').startswith(prefix):
-            count += 1
-    return count + 1
-
-def generate_central_number(parish_name):
-    now = datetime.datetime.utcnow()
-    year = now.year
-    pc = parish_code_from_name(parish_name)
-    seq = next_sequence_for_parish(load_data(), year, pc)
-    return f"{year}/{pc}/{seq:04d}"
-
-def validate_date_iso(s):
+# Réception d'un nouvel acte
+@socketio.on('enregistrer_mariage')
+def handle_enregistrer(data):
     try:
-        # autorise YYYY-MM-DD (date) ou full ISO
-        datetime.datetime.fromisoformat(s)
-        return True
-    except:
-        return False
+        # Extraction et validation
+        required = ['nom_epoux', 'nom_epouse', 'date_mariage', 'lieu_mariage',
+                    'nom_paroisse', 'officiant', 'temoin1', 'temoin2', 'num_acte_local', 'code_paroisse']
+        
+        for field in required:
+            if not data.get(field):
+                emit('erreur', {'msg': f'Champ manquant : {field}'})
+                return
 
-# --- Chargement initial ---
-data = load_data()
-parish_certs = load_parish_certs()
+        annee = data['date_mariage'][:4]
+        num_central = generer_num_central(data['code_paroisse'].upper()[:2], annee)
 
-# --- Socket.IO: auth on connect ---
-@socketio.on('connect')
-def handle_connect(auth=None):
-    # auth may be None. We check header 'X-Parish-Cert' or auth dict.
-    token = None
-    try:
-        token = request.headers.get('X-Parish-Cert') or (auth.get('token') if auth else None)
-    except:
-        token = None
-    # require a valid token
-    if not token:
-        # refuse connection
-        return False
-    # check token exists in parish_certs
-    if token not in parish_certs.values():
-        return False
-    # connected
-    # (could store session->parish mapping if needed)
-    print('Socket connected, token OK')
+        with db_lock:
+            conn = sqlite3.connect('mariages.db')
+            c = conn.cursor()
+            c.execute('''
+                INSERT INTO mariages 
+                (nom_epoux, nom_epouse, date_mariage, lieu_mariage, nom_paroisse, officiant,
+                 temoin1, temoin2, num_acte_local, num_acte_central, statut_transmission)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ''', (
+                data['nom_epoux'][:50], data['nom_epouse'][:50], data['date_mariage'],
+                data['lieu_mariage'][:100], data['nom_paroisse'][:60], data['officiant'][:50],
+                data['temoin1'][:50], data['temoin2'][:50], int(data['num_acte_local']),
+                num_central
+            ))
+            conn.commit()
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('Socket disconnected')
-
-# --- Routes ---
-@app.route('/api/marriages', methods=['GET'])
-def list_marriages():
-    # retourne toutes les marriages (authentication optional)
-    # require parish token to view
-    header_token = request.headers.get('X-Parish-Cert', '')
-    if header_token not in parish_certs.values():
-        return jsonify({'error': 'Token paroissial invalide'}), 401
-    return jsonify(data['marriages'])
-
-@app.route('/api/transmit', methods=['POST'])
-def receive_transmission():
-    """
-    Endpoint:
-    - JSON body with fields (Nom_epoux, Nom_epouse, Date_mariage, Lieu_mariage, Nom_paroisse, Officiant, Temoin1, Temoin2, Num_acte_local)
-    - Header 'X-Parish-Cert' containing the token for the parish
-    """
-    try:
-        payload = request.get_json(force=True)
-    except:
-        return jsonify({'error': 'JSON invalide'}), 400
-
-    header_token = request.headers.get('X-Parish-Cert', '')
-    parish_name = payload.get('Nom_paroisse', '').strip()
-    if not parish_name:
-        return jsonify({'error': 'Nom_paroisse requis'}), 400
-
-    pc = parish_code_from_name(parish_name)
-    expected = parish_certs.get(pc)
-    if expected is None:
-        return jsonify({'error': f'Paroisse non enregistrée pour code {pc}'}), 401
-    if header_token != expected:
-        return jsonify({'error': 'Certificat paroissial invalide'}), 401
-
-    # Champs obligatoires
-    required = ['Nom_epoux','Nom_epouse','Date_mariage','Lieu_mariage','Nom_paroisse',
-                'Officiant','Temoin1','Temoin2','Num_acte_local']
-    for r in required:
-        if not payload.get(r):
-            return jsonify({'error': f'Champ requis manquant: {r}'}), 400
-
-    # vérification date
-    date_m = payload.get('Date_mariage')
-    if not validate_date_iso(date_m):
-        return jsonify({'error': 'Date_mariage doit être en format ISO YYYY-MM-DD'}), 400
-
-    # Générer numéro central
-    with lock:
-        num_central = generate_central_number(parish_name)
-        acte = {
+        # Diffuser à tous les clients connectés
+        socketio.emit('nouveau_mariage', {
             'num_acte_central': num_central,
-            'num_acte_local': int(payload.get('Num_acte_local')),
-            'Nom_paroisse': parish_name,
-            'parish_code': pc,
-            'Nom_epoux': payload.get('Nom_epoux'),
-            'Nom_epouse': payload.get('Nom_epouse'),
-            'Date_mariage': payload.get('Date_mariage'),
-            'Lieu_mariage': payload.get('Lieu_mariage'),
-            'Officiant': payload.get('Officiant'),
-            'Temoin1': payload.get('Temoin1'),
-            'Temoin2': payload.get('Temoin2'),
-            'statut_transmission': True,
-            'Date_transmission': datetime.datetime.utcnow().isoformat()
-        }
-        # Sauvegarder central
-        data['marriages'].append(acte)
-        save_data(data)
+            'nom_epoux': data['nom_epoux'],
+            'nom_epouse': data['nom_epouse'],
+            'date_mariage': data['date_mariage']
+        })
 
-    # broadcast real-time to connected clients
-    try:
-        socketio.emit('new_marriage', acte, broadcast=True)
+        emit('succes_enregistrement', {
+            'msg': 'Acte enregistré et transmis avec succès !',
+            'num_acte_central': num_central
+        })
+
     except Exception as e:
-        print('Erreur broadcast socket:', e)
+        emit('erreur', {'msg': str(e)})
 
-    # Retour pour mise à jour côté paroisse
-    return jsonify({'success': True, 'num_acte_central': num_central, 'Date_transmission': acte['Date_transmission']}), 200
+# Recherche en temps réel
+@socketio.on('rechercher_mariage')
+def handle_recherche(data):
+    nom_epoux = data.get('nom_epoux', '').strip().lower()
+    nom_epouse = data.get('nom_epouse', '').strip().lower()
 
-@app.route('/api/search', methods=['GET', 'POST'])
-def search_marriage():
-    """
-    Rechercher un acte :
-    - GET params: nom_epoux, nom_epouse, date_mariage (optionnel)
-    - POST JSON: same fields
-    Header X-Parish-Cert required.
-    """
-    header_token = request.headers.get('X-Parish-Cert', '')
-    if header_token not in parish_certs.values():
-        return jsonify({'error': 'Token paroissial invalide'}), 401
+    with sqlite3.connect('mariages.db') as conn:
+        c = conn.cursor()
+        query = "SELECT nom_epoux, nom_epouse, date_mariage, lieu_mariage, num_acte_central FROM mariages WHERE 1=1"
+        params = []
+        if nom_epoux:
+            query += " AND LOWER(nom_epoux) LIKE ?"
+            params.append(f"%{nom_epoux}%")
+        if nom_epouse:
+            query += " AND LOWER(nom_epouse) LIKE ?"
+            params.append(f"%{nom_epouse}%")
+        
+        c.execute(query, params)
+        results = c.fetchall()
 
-    if request.method == 'POST':
-        try:
-            q = request.get_json(force=True)
-        except:
-            return jsonify({'error': 'JSON invalide'}), 400
-    else:
-        q = request.args
+        emit('resultats_recherche', {
+            'results': [
+                {
+                    'nom_epoux': r[0],
+                    'nom_epouse': r[1],
+                    'date_mariage': r[2],
+                    'lieu_mariage': r[3],
+                    'num_acte_central': r[4]
+                } for r in results
+            ]
+        })
 
-    ne = (q.get('nom_epoux') or q.get('Nom_epoux') or '').strip().lower()
-    ne2 = (q.get('nom_epouse') or q.get('Nom_epouse') or '').strip().lower()
-    date = (q.get('date_mariage') or q.get('Date_mariage') or '').strip()
-
-    results = []
-    for m in data['marriages']:
-        m_ne = (m.get('Nom_epoux','') or '').strip().lower()
-        m_ne2 = (m.get('Nom_epouse','') or '').strip().lower()
-        m_date = (m.get('Date_mariage') or '').strip()
-        ok = True
-        if ne and ne not in m_ne:
-            ok = False
-        if ne2 and ne2 not in m_ne2:
-            ok = False
-        if date and date != m_date:
-            ok = False
-        if ok:
-            results.append(m)
-    return jsonify({'count': len(results), 'results': results}), 200
-
-# Endpoint pour administrer (ajouter/modifier tokens) - sécurisé par clé d'admin simple (env)
-@app.route('/api/admin/add_parish', methods=['POST'])
-def add_parish():
-    admin_key = os.environ.get('ADMIN_KEY', 'admin-secret')  # change en prod
-    if request.headers.get('X-Admin-Key') != admin_key:
-        return jsonify({'error': 'Admin key invalide'}), 401
-    payload = request.get_json(force=True)
-    name = payload.get('name', '').strip()
-    token = payload.get('token', '').strip()
-    if not name or not token:
-        return jsonify({'error': 'name et token requis'}), 400
-    pc = parish_code_from_name(name)
-    parish_certs[pc] = token
-    with open(PARISH_CERTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(parish_certs, f, ensure_ascii=False, indent=2)
-    return jsonify({'success': True, 'code_paroisse': pc}), 200
-
-# simple health
-@app.route('/health', methods=['GET'])
-def health():
-    return 'OK', 200
+# Liste complète des mariages
+@socketio.on('lister_tout')
+def handle_lister():
+    with sqlite3.connect('mariages.db') as conn:
+        c = conn.cursor()
+        c.execute("SELECT nom_epoux, nom_epouse, date_mariage, num_acte_central, statut_transmission FROM mariages ORDER BY date_mariage DESC")
+        rows = c.fetchall()
+        emit('liste_complete', {
+            'mariages': [
+                {
+                    'nom_epoux': r[0],
+                    'nom_epouse': r[1],
+                    'date_mariage': r[2],
+                    'num_acte_central': r[3],
+                    'transmis': 'Oui' if r[4] else 'En attente'
+                } for r in rows
+            ]
+        })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    # eventlet required by flask-socketio for production; Render supports it
-    socketio.run(app, host='0.0.0.0', port=port)
-
+    socketio.run(app, host='0.0.0.0', port=10000)
