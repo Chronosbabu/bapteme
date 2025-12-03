@@ -8,7 +8,7 @@ from threading import Lock
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ton-secret-ultra-fort-ici-123456789'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Verrou pour la base de données
 db_lock = Lock()
