@@ -1,4 +1,4 @@
-# main.py - Serveur Flask-SocketIO pour bapteme.orender.com
+# main.py - Serveur Flask-SocketIO pour bapteme.onrender.com
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
 import sqlite3
@@ -50,7 +50,7 @@ init_db()
 # Route de test
 @app.route('/')
 def index():
-    return "Serveur Mariages Catholiques ON - bapteme.orender.com"
+    return "Serveur Mariages Catholiques ON - bapteme.onrender.com"
 
 # Réception d'un nouvel acte
 @socketio.on('enregistrer_mariage')
@@ -59,7 +59,7 @@ def handle_enregistrer(data):
         # Extraction et validation
         required = ['nom_epoux', 'nom_epouse', 'date_mariage', 'lieu_mariage',
                     'nom_paroisse', 'officiant', 'temoin1', 'temoin2', 'num_acte_local', 'code_paroisse']
-        
+      
         for field in required:
             if not data.get(field):
                 emit('erreur', {'msg': f'Champ manquant : {field}'})
@@ -72,15 +72,15 @@ def handle_enregistrer(data):
             conn = sqlite3.connect('mariages.db')
             c = conn.cursor()
             c.execute('''
-                INSERT INTO mariages 
+                INSERT INTO mariages
                 (nom_epoux, nom_epouse, date_mariage, lieu_mariage, nom_paroisse, officiant,
-                 temoin1, temoin2, num_acte_local, num_acte_central, statut_transmission)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                 temoin1, temoin2, num_acte_local, num_acte_central, statut_transmission, date_transmission)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             ''', (
                 data['nom_epoux'][:50], data['nom_epouse'][:50], data['date_mariage'],
                 data['lieu_mariage'][:100], data['nom_paroisse'][:60], data['officiant'][:50],
                 data['temoin1'][:50], data['temoin2'][:50], int(data['num_acte_local']),
-                num_central
+                num_central, datetime.datetime.now().isoformat()
             ))
             conn.commit()
 
@@ -116,7 +116,7 @@ def handle_recherche(data):
         if nom_epouse:
             query += " AND LOWER(nom_epouse) LIKE ?"
             params.append(f"%{nom_epouse}%")
-        
+      
         c.execute(query, params)
         results = c.fetchall()
 
