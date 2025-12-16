@@ -3,17 +3,14 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit
 import sqlite3
 import datetime
-import re
 from threading import Lock
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ton-secret-ultra-fort-ici-123456789'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Verrou pour la base de données
 db_lock = Lock()
 
-# Initialisation DB
 def init_db():
     with sqlite3.connect('mariages.db') as conn:
         c = conn.cursor()
@@ -36,7 +33,6 @@ def init_db():
         ''')
         conn.commit()
 
-# Générer Num_acte_central : AAAA/PP/XXXX
 def generer_num_central(paroisse_code, annee):
     with db_lock:
         with sqlite3.connect('mariages.db') as conn:
@@ -47,19 +43,15 @@ def generer_num_central(paroisse_code, annee):
 
 init_db()
 
-# Route de test
 @app.route('/')
 def index():
     return "Serveur Mariages Catholiques ON - bapteme.onrender.com"
 
-# Réception d'un nouvel acte
 @socketio.on('enregistrer_mariage')
 def handle_enregistrer(data):
     try:
-        # Extraction et validation
         required = ['nom_epoux', 'nom_epouse', 'date_mariage', 'lieu_mariage',
                     'nom_paroisse', 'officiant', 'temoin1', 'temoin2', 'num_acte_local', 'code_paroisse']
-      
         for field in required:
             if not data.get(field):
                 emit('erreur', {'msg': f'Champ manquant : {field}'})
@@ -84,7 +76,6 @@ def handle_enregistrer(data):
             ))
             conn.commit()
 
-        # Diffuser à tous les clients connectés
         socketio.emit('nouveau_mariage', {
             'num_acte_central': num_central,
             'nom_epoux': data['nom_epoux'],
@@ -100,7 +91,6 @@ def handle_enregistrer(data):
     except Exception as e:
         emit('erreur', {'msg': str(e)})
 
-# Recherche en temps réel
 @socketio.on('rechercher_mariage')
 def handle_recherche(data):
     nom_epoux = data.get('nom_epoux', '').strip().lower()
@@ -116,10 +106,8 @@ def handle_recherche(data):
         if nom_epouse:
             query += " AND LOWER(nom_epouse) LIKE ?"
             params.append(f"%{nom_epouse}%")
-      
         c.execute(query, params)
         results = c.fetchall()
-
         emit('resultats_recherche', {
             'results': [
                 {
@@ -132,7 +120,6 @@ def handle_recherche(data):
             ]
         })
 
-# Liste complète des mariages
 @socketio.on('lister_tout')
 def handle_lister():
     with sqlite3.connect('mariages.db') as conn:
@@ -151,5 +138,20 @@ def handle_lister():
             ]
         })
 
+@socketio.on('supprimer_mariage')
+def handle_supprimer(data):
+    num_central = data.get('num_acte_central')
+    if not num_central:
+        emit('erreur', {'msg': 'Numéro d\'acte manquant pour suppression'})
+        return
+    with db_lock:
+        with sqlite3.connect('mariages.db') as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM mariages WHERE num_acte_central = ?", (num_central,))
+            conn.commit()
+    emit('succes_suppression', {'num_acte_central': num_central})
+    socketio.emit('mariage_supprime', {'num_acte_central': num_central})
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=10000)
+
