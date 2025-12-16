@@ -8,7 +8,6 @@ from threading import Lock
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ton-secret-ultra-fort-ici-123456789'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-
 db_lock = Lock()
 
 def init_db():
@@ -56,10 +55,8 @@ def handle_enregistrer(data):
             if not data.get(field):
                 emit('erreur', {'msg': f'Champ manquant : {field}'})
                 return
-
         annee = data['date_mariage'][:4]
         num_central = generer_num_central(data['code_paroisse'].upper()[:2], annee)
-
         with db_lock:
             conn = sqlite3.connect('mariages.db')
             c = conn.cursor()
@@ -75,19 +72,16 @@ def handle_enregistrer(data):
                 num_central, datetime.datetime.now().isoformat()
             ))
             conn.commit()
-
         socketio.emit('nouveau_mariage', {
             'num_acte_central': num_central,
             'nom_epoux': data['nom_epoux'],
             'nom_epouse': data['nom_epouse'],
             'date_mariage': data['date_mariage']
         })
-
         emit('succes_enregistrement', {
             'msg': 'Acte enregistré et transmis avec succès !',
             'num_acte_central': num_central
         })
-
     except Exception as e:
         emit('erreur', {'msg': str(e)})
 
@@ -95,7 +89,6 @@ def handle_enregistrer(data):
 def handle_recherche(data):
     nom_epoux = data.get('nom_epoux', '').strip().lower()
     nom_epouse = data.get('nom_epouse', '').strip().lower()
-
     with sqlite3.connect('mariages.db') as conn:
         c = conn.cursor()
         query = "SELECT nom_epoux, nom_epouse, date_mariage, lieu_mariage, num_acte_central FROM mariages WHERE 1=1"
@@ -124,7 +117,12 @@ def handle_recherche(data):
 def handle_lister():
     with sqlite3.connect('mariages.db') as conn:
         c = conn.cursor()
-        c.execute("SELECT nom_epoux, nom_epouse, date_mariage, num_acte_central, statut_transmission FROM mariages ORDER BY date_mariage DESC")
+        c.execute("""
+            SELECT nom_epoux, nom_epouse, date_mariage, lieu_mariage, nom_paroisse,
+                   officiant, temoin1, temoin2, num_acte_local, num_acte_central,
+                   statut_transmission
+            FROM mariages ORDER BY date_mariage DESC
+        """)
         rows = c.fetchall()
         emit('liste_complete', {
             'mariages': [
@@ -132,8 +130,14 @@ def handle_lister():
                     'nom_epoux': r[0],
                     'nom_epouse': r[1],
                     'date_mariage': r[2],
-                    'num_acte_central': r[3],
-                    'transmis': 'Oui' if r[4] else 'En attente'
+                    'lieu_mariage': r[3],
+                    'nom_paroisse': r[4],
+                    'officiant': r[5],
+                    'temoin1': r[6],
+                    'temoin2': r[7],
+                    'num_acte_local': r[8],
+                    'num_acte_central': r[9],
+                    'transmis': 'Oui' if r[10] else 'En attente'
                 } for r in rows
             ]
         })
@@ -154,4 +158,3 @@ def handle_supprimer(data):
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=10000)
-
